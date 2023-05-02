@@ -1,6 +1,5 @@
 #include "HX711.h"
-#include <avr/io.h>
-#include <avr/interrupt.h>
+#include "GyverTimers.h"
 
 HX711 wt_chip;
 
@@ -11,7 +10,7 @@ enum PINS {
   AWT_BUT = 2                           // in pin, connected to the button
 };
 
-const int AWT_BUT_INT = digitalPinToInterrupt(AWT_BUT);
+const unsigned AWT_BUT_INT = digitalPinToInterrupt(AWT_BUT);
 
 volatile bool await;
 
@@ -30,18 +29,18 @@ void recalibrate() {
   wt_chip.tare();                       // maybe no wrapper needed
 }
 
-const int NLEDS = 6;
-const int LED_PINS[6] = {3, 4, 5, 6, 7, 10};
+const unsigned NLEDS = 6;
+const unsigned LED_PINS[6] = {3, 4, 5, 6, 7, 10};
 int leds_lit = 0;
 
 bool overload_beeping = false;
 
 inline void beep() {
-  tone(BEP_PWM, 1500, 500);
+  tone(BEP_PWM, 1500, 100);
 }
 
 inline void overload_beep() {
-  tone(BEP_PWM, 3000);
+  tone(BEP_PWM, 500);
   overload_beeping = true;
 }
 
@@ -54,25 +53,61 @@ volatile bool weight_changed = false;
 volatile bool pulse_beeping = false;
 volatile bool beep_pulse_up = false;
 
-ISR(TIM1_COMPA_vect) {
-  pulse_beeping = !weight_changed;      // start beeping if weight didn't change
-  weight_changed = false;
+inline void pulse_beep() {
+  tone(BEP_PWM, 500);
+  beep_pulse_up = true;
 }
 
-ISR(TIM0_OVF_vect) {
-  if (!overload_beeping) {
-    if (beep_pulse_up) {
-      noTone(BEP_PWM);
-      beep_pulse_up = false;
-    } else if (pulse_beeping) {
-      tone(BEP_PWM, 3000);
-      beep_pulse_up = true;
+inline void stop_pulse_beep() {
+  noTone(BEP_PWM);
+  beep_pulse_up = false;
+}
+
+const unsigned TIM1_ROUNDS = 20;
+unsigned tim1_ctr = 0;
+
+ISR(TIMER1_A) {
+  if (!pulse_beeping) {
+    if (tim1_ctr < TIM1_ROUNDS) {
+      if (weight_changed) {
+        tim1_ctr = 0;
+        weight_changed = false;
+      } else {
+        tim1_ctr += 1;
+      }
+    } else {
+      pulse_beeping = true;
     }
+  } else if (weight_changed) {
+    pulse_beeping = false;
+    weight_changed = false;
+    tim1_ctr = 0;
   }
 }
 
+const unsigned TIM0_ROUNDS = 15;
+unsigned tim0_ctr = 0;
+
+ISR(TIMER0_A) {
+  if (tim0_ctr >= TIM0_ROUNDS) {
+    if (!overload_beeping) {
+      if (beep_pulse_up) {
+        stop_pulse_beep();
+      } else if (pulse_beeping) {
+        pulse_beep();
+      }
+    }
+    tim0_ctr = 0;
+  } else {
+    tim0_ctr += 1;
+  }
+}
+
+#define FIFTEENMILSEC 15000
+#define HALFSEC 500000
+
 void setup() {
-  pinMode(LED_BUILTIN, OUTPUT);
+  pinMode(BEP_PWM, OUTPUT);
 
   pinMode(AWT_BUT, INPUT);
   attachInterrupt(AWT_BUT_INT, stop_wait, RISING);
@@ -81,46 +116,33 @@ void setup() {
   wt_chip.set_average_mode();
 
   beep();
-  digitalWrite(LED_BUILTIN, HIGH);
   wait_button();
   wt_chip.tare();
-  digitalWrite(LED_BUILTIN, LOW);
 
   beep();
-  digitalWrite(LED_BUILTIN, HIGH);
   wait_button();
   wt_chip.calibrate_scale(1, 10);       // 1 coin exactly
-  digitalWrite(LED_BUILTIN, LOW);
 
   for (int i = 0; i < NLEDS; ++i) {
     pinMode(LED_PINS[i], OUTPUT);
     digitalWrite(LED_PINS[i], LOW);
   }
 
-  noInterrupts();
+  Timer0.setPeriod(FIFTEENMILSEC);
+  Timer1.setPeriod(HALFSEC);
 
+  noInterrupts();
+  Timer0.enableISR(CHANNEL_A);
+  Timer1.enableISR(CHANNEL_A);
   detachInterrupt(AWT_BUT_INT);         // for safe int replacemet
   attachInterrupt(AWT_BUT_INT, recalibrate, RISING);
-
-  TCCR1A = 0;                           // preparing timer
-  TCCR1B = 0;
-  OCR1A = 62500;                        // interrupt every 4s
-  TCCR1B |= (1 << WGM12);               // going "comapare" mode
-  TCCR1B |= (1 << CS10);                // frequency adjustment (1024 divisor)
-  TCCR1B |= (1 << CS12);
-  TIMSK1 |= (1 << OCIE1A);
-
-  TCCR0A = 0;                           // again for another timer
-  TCCR0B = 0;
-  TIMSK0 = (1 << TOIE0);                // interrupt upon overflow
-  TCCR0B |= (1 << CS10);
-  TCCR0B |= (1 << CS12);
-
   interrupts();
+
+  beep();
 }
 
 void loop() {
-  float weight = wt_chip.get_units(10);
+  float weight = wt_chip.get_units();
   
   if (weight > (float)NLEDS + 0.5) {
     if (!overload_beeping) {
