@@ -1,0 +1,4 @@
+whole measurement duration: 56.160876750946045
+single measurement duration: 28.080438375473022
+step duration: 0.4011491196496146
+discretization rate: 0.012890625
